@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// All money is stored as integers in minor units (paise for INR). Never floats.
+
+model Merchant {
+  id            String   @id @default(uuid())
+  name          String
+  apiKeyHash    String   @unique
+  webhookUrl    String?
+  webhookSecret String
+  createdAt     DateTime @default(now())
+
+  payments         Payment[]
+  idempotencyKeys  IdempotencyKey[]
+  webhookDeliveries WebhookDelivery[]
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  VOIDED
+  FAILED
+}
+
+model Payment {
+  id               String        @id @default(uuid())
+  merchantId       String
+  merchant         Merchant      @relation(fields: [merchantId], references: [id])
+  amount           BigInt
+  currency         String        @default("INR")
+  status           PaymentStatus @default(CREATED)
+  capturedAmount   BigInt        @default(0)
+  refundedAmount   BigInt        @default(0)
+  bankReference    String?
+  failureReason    String?
+  metadata         Json?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  ledgerEntries     LedgerEntry[]
+  webhookDeliveries WebhookDelivery[]
+
+  @@index([merchantId, createdAt])
+  @@index([status])
+}
+
+// Same key + same request body returns the stored response.
+// Same key + different body is rejected (422).
+model IdempotencyKey {
+  id             String   @id @default(uuid())
+  merchantId     String
+  merchant       Merchant @relation(fields: [merchantId], references: [id])
+  key            String
+  requestHash    String
+  responseStatus Int?
+  responseBody   Json?
+  paymentId      String?
+  lockedAt       DateTime?
+  createdAt      DateTime @default(now())
+
+  @@unique([merchantId, key])
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  REVENUE
+}
+
+model LedgerAccount {
+  id        String      @id @default(uuid())
+  code      String      @unique // e.g. "bank_clearing", "merchant_payable:<merchantId>", "fees_revenue"
+  type      AccountType
+  createdAt DateTime    @default(now())
+
+  entries LedgerEntry[]
+}
+
+enum EntryDirection {
+  DEBIT
+  CREDIT
+}
+
+// Every business event writes 2+ entries sharing a transactionId.
+// Invariant (enforced in code and tested): per transactionId, sum(DEBIT) == sum(CREDIT).
+model LedgerEntry {
+  id            String         @id @default(uuid())
+  transactionId String
+  accountId     String
+  account       LedgerAccount  @relation(fields: [accountId], references: [id])
+  paymentId     String?
+  payment       Payment?       @relation(fields: [paymentId], references: [id])
+  direction     EntryDirection
+  amount        BigInt
+  createdAt     DateTime       @default(now())
+
+  @@index([transactionId])
+  @@index([accountId])
+  @@index([paymentId])
+}
+
+enum WebhookStatus {
+  PENDING
+  DELIVERED
+  RETRYING
+  DEAD
+}
+
+model WebhookDelivery {
+  id            String        @id @default(uuid())
+  merchantId    String
+  merchant      Merchant      @relation(fields: [merchantId], references: [id])
+  paymentId     String
+  payment       Payment       @relation(fields: [paymentId], references: [id])
+  eventType     String        // payment.authorized, payment.captured, payment.refunded, payment.failed
+  payload       Json
+  status        WebhookStatus @default(PENDING)
+  attempts      Int           @default(0)
+  nextAttemptAt DateTime      @default(now())
+  lastError     String?
+  createdAt     DateTime      @default(now())
+
+  @@index([status, nextAttemptAt])
+}
