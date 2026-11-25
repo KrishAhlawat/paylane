@@ -7,15 +7,18 @@
  *      │            └──► VOIDED
  *      └──► FAILED  (also reachable from AUTHORIZED, e.g. capture rejected by bank)
  */
-export enum PaymentStatus {
-  CREATED = 'CREATED',
-  AUTHORIZED = 'AUTHORIZED',
-  CAPTURED = 'CAPTURED',
-  PARTIALLY_REFUNDED = 'PARTIALLY_REFUNDED',
-  REFUNDED = 'REFUNDED',
-  VOIDED = 'VOIDED',
-  FAILED = 'FAILED',
-}
+// A const object plus a union type (not a TS enum), so values are plain string
+// literals and assign directly to Prisma's generated PaymentStatus type.
+export const PaymentStatus = {
+  CREATED: 'CREATED',
+  AUTHORIZED: 'AUTHORIZED',
+  CAPTURED: 'CAPTURED',
+  PARTIALLY_REFUNDED: 'PARTIALLY_REFUNDED',
+  REFUNDED: 'REFUNDED',
+  VOIDED: 'VOIDED',
+  FAILED: 'FAILED',
+} as const;
+export type PaymentStatus = (typeof PaymentStatus)[keyof typeof PaymentStatus];
 
 const TRANSITIONS: Readonly<Record<PaymentStatus, readonly PaymentStatus[]>> = {
   [PaymentStatus.CREATED]: [PaymentStatus.AUTHORIZED, PaymentStatus.FAILED],

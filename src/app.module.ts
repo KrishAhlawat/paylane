@@ -1,4 +1,6 @@
 import { Controller, Get, Module } from '@nestjs/common';
+import { PaymentsModule } from './payments/payments.module';
+import { PrismaModule } from './prisma/prisma.module';
 
 @Controller()
 class HealthController {
@@ -8,8 +10,9 @@ class HealthController {
   }
 }
 
-// Feature modules (payments, ledger, webhooks, mock-bank) get registered here as they are built.
+// Ledger, webhooks and reconciliation modules get registered here as they are built.
 @Module({
+  imports: [PrismaModule, PaymentsModule],
   controllers: [HealthController],
 })
 export class AppModule {}

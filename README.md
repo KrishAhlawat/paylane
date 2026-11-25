@@ -2,7 +2,7 @@
 
 A payment processing service that handles the full life of a payment (authorize, capture, refund) with **no double-charges on retries** and a **double-entry ledger that always balances**. Built against a mock bank, so no real money or card data is ever involved.
 
-> Learning/portfolio project. Not a licensed payment aggregator. Never send real card numbers to it.
+> Learning/portfolio project. Not a licensed payment aggregator. Never send real card numbers to it (the API rejects anything that is not a `tok_...` test token).
 
 ## Why this exists
 
@@ -29,35 +29,73 @@ NestJS, TypeScript, PostgreSQL (Prisma), Redis, Jest.
 
 ```bash
 cp .env.example .env
-docker compose up -d          # Postgres + Redis
+docker compose up -d          # Postgres (host port 54329) + Redis
 npm install
 npx prisma generate
 npx prisma migrate dev --name init
+npm run merchant:create -- "My Shop"   # prints an API key once
 npm run start:dev             # GET http://localhost:3000/health
-npm test
 ```
 
-## API sketch (planned)
+Postgres is published on host port **54329**, not 5432, so it cannot collide with a Postgres already installed on your machine.
 
-| Method | Path | Notes |
+## Tests
+
+```bash
+npm test            # unit + in-memory HTTP tests, no Docker needed
+npm run test:e2e    # against the real database (docker compose up -d first)
+```
+
+## API
+
+All endpoints need `Authorization: Bearer pl_test_...`. Money is an integer in paise: `10000` = Rs 100.00.
+
+| Method | Path | Status |
 |---|---|---|
-| POST | `/payments` | Requires `Idempotency-Key` header. Creates and authorizes via mock bank. |
-| POST | `/payments/:id/capture` | Full or partial capture. |
-| POST | `/payments/:id/void` | Only from `AUTHORIZED`. |
-| POST | `/payments/:id/refunds` | Partial or full. Cannot exceed captured amount. |
-| GET | `/payments/:id` | Current state and ledger entries. |
-| GET | `/health` | Liveness. |
+| POST | `/payments` | Done. Requires `Idempotency-Key`. Creates and authorizes via the mock bank. |
+| GET | `/payments/:id` | Done. Scoped to the calling merchant. |
+| POST | `/payments/:id/capture` | Week 2 |
+| POST | `/payments/:id/void` | Week 2 |
+| POST | `/payments/:id/refunds` | Week 2 |
+| GET | `/health` | Done. No auth. |
 
-Webhook events: `payment.authorized`, `payment.captured`, `payment.refunded`, `payment.failed`.
+### Create a payment (PowerShell)
+
+```powershell
+$key  = "pl_test_..."                       # from npm run merchant:create
+$idem = [guid]::NewGuid().ToString()
+
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/payments `
+  -Headers @{ Authorization = "Bearer $key"; "Idempotency-Key" = $idem } `
+  -ContentType "application/json" `
+  -Body '{"amount":10000,"payment_method_token":"tok_approve"}'
+```
+
+Run it twice with the same `$idem` and you get the same payment back (response header `Idempotent-Replayed: true`) instead of a second charge.
+
+### Mock bank test tokens
+
+| Token | Bank result | HTTP | Payment status |
+|---|---|---|---|
+| `tok_approve` | approved | 201 | `AUTHORIZED` |
+| `tok_decline` | declined (`insufficient_funds`) | 402 | `FAILED` |
+| `tok_timeout` | timed out (`bank_timeout`) | 504 | `FAILED` |
+| anything else, e.g. `tok_visa_1` | random, by `MOCK_BANK_*_RATE` | varies | varies |
+
+Errors: `400` bad body or missing `Idempotency-Key`, `401` bad API key, `404` unknown payment, `409` same key still being processed, `422` same key reused with a different body.
+
+Planned webhook events: `payment.authorized`, `payment.captured`, `payment.refunded`, `payment.failed`.
 Signature header: `Paylane-Signature: t=<unix>,v1=<hmac_sha256(secret, t + "." + body)>`.
 
 ## Design decisions
 
-- **Money is `BigInt` minor units.** Floats lose paise.
-- **State machine is pure** (`src/payments/payment-state-machine.ts`). Every legal and illegal transition is unit-tested before any database code exists.
-- **Idempotency:** unique `(merchantId, key)` row. Same key and same body returns the stored response. Same key with a different body returns 422. A concurrent duplicate waits on the row lock rather than creating a second payment.
-- **Ledger invariant:** for every `transactionId`, sum of debits equals sum of credits. Enforced in code and covered by a property-style test.
-- **Concurrency:** payment rows are updated inside a transaction with `SELECT ... FOR UPDATE` so two captures or refunds cannot race.
+- **Money is `BigInt` minor units** in the database; the API exposes integers. Floats lose paise.
+- **State machine is pure** (`src/payments/payment-state-machine.ts`). Every legal and illegal transition is unit-tested before any database code touches it.
+- **Idempotency** (`src/idempotency/`): a unique `(merchantId, key)` row is claimed with `INSERT ... ON CONFLICT DO NOTHING`, inside the same transaction that creates the payment. Exactly one concurrent request wins the claim. The rest either replay the stored response, get `409` while the original is still running, or get `422` if the body differs. A request body is fingerprinted with a canonical JSON hash, so key order does not matter.
+- **Three-phase create:** (1) one transaction claims the key and inserts the payment as `CREATED`; (2) the bank is called with no transaction held open; (3) one transaction moves `CREATED -> AUTHORIZED/FAILED` with a compare-and-swap on status and stores the response. Failed bank outcomes are stored and replayed too, so retrying with the same key never re-hits the bank. To retry a declined payment, use a new key.
+- **Known gap:** if the process dies between phases 1 and 3, the payment stays `CREATED` and its key stays locked (retries get `409`, never a duplicate). The reconciliation/recovery job in week 3 resolves these.
+- **Ledger invariant (week 2):** for every `transactionId`, sum of debits equals sum of credits, enforced in code and tested.
+- **Concurrency (week 2):** capture and refund will lock the payment row (`SELECT ... FOR UPDATE`) so they cannot race.
 
 ## Build plan
 
@@ -65,7 +103,7 @@ Signature header: `Paylane-Signature: t=<unix>,v1=<hmac_sha256(secret, t + "." +
 |---|---|---|
 | 1 | State machine, schema, `POST /payments` with idempotency, mock bank, deployed | Duplicate requests create one payment; app is live on a public URL |
 | 2 | Capture, void, refunds, double-entry ledger | Ledger balances after any sequence of operations |
-| 3 | Signed webhooks, retries, dead-letter, reconciliation job | Webhooks survive a flapping merchant endpoint |
+| 3 | Signed webhooks, retries, dead-letter, reconciliation and recovery job | Webhooks survive a flapping merchant endpoint |
 | 4 | Load test, failure injection, README numbers, architecture diagram | Resume numbers measured, not guessed |
 
 ## Numbers to measure (fill in, don't invent)
@@ -77,12 +115,15 @@ Signature header: `Paylane-Signature: t=<unix>,v1=<hmac_sha256(secret, t + "." +
 
 ## Status
 
-- [x] Repo scaffold, Docker Compose, Prisma schema
-- [x] Payment state machine with 14 passing unit tests
-- [ ] Prisma client generated and first migration run (run locally: `npx prisma generate && npx prisma migrate dev --name init`)
-- [ ] `POST /payments` with idempotency
-- [ ] Mock bank
+- [x] Repo scaffold, Docker Compose, Prisma schema, first migration
+- [x] Payment state machine
+- [x] Mock bank with deterministic test tokens
+- [x] API-key auth and merchant creation script
+- [x] `POST /payments` and `GET /payments/:id` with idempotency
+- [x] Unit tests, in-memory HTTP tests, and a real-database e2e suite (including 25 simultaneous duplicate requests)
+- [ ] Deploy to a public URL (finish week 1)
+- [ ] Capture, void, refunds
 - [ ] Ledger
 - [ ] Webhooks
-- [ ] Reconciliation
+- [ ] Reconciliation and recovery job
 - [ ] Load test and numbers

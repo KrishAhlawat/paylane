@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: paylane
       POSTGRES_DB: paylane
     ports:
-      - "5432:5432"
+      - "54329:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
